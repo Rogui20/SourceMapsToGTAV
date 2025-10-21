@@ -17,13 +17,14 @@ else:
 # =========================
 def get_arg(k, default=None, cast=str):
     for a in sys.argv:
-        if a.startswith(k+"="):
+        if a.startswith("--" + k + "=") or a.startswith(k + "="):
             try:
-                v = a.split("=",1)[1].strip().strip('"').strip("'")
+                v = a.split("=", 1)[1].strip().strip('"').strip("'")
                 return cast(v)
             except Exception:
                 return default
     return default
+
 
 
 MAP_NAME = get_arg("MAP_NAME", "track1", str)
@@ -31,11 +32,20 @@ MAP_NAME = get_arg("MAP_NAME", "track1", str)
 OUTPUT_ROOT = os.path.abspath("D:/TrackGen/output/" + MAP_NAME)
 OUTPUT_PATH = os.path.join(OUTPUT_ROOT, "track_data.json")
 OUTPUT_DIR = os.path.dirname(OUTPUT_PATH)
+os.makedirs(OUTPUT_ROOT, exist_ok=True)
 os.makedirs(OUTPUT_DIR, exist_ok=True)
 OUTPUT_GTA_FILES = os.path.join(OUTPUT_ROOT, "output_gta")
 os.makedirs(OUTPUT_GTA_FILES, exist_ok=True)
 LOD_LIMIT = get_arg("LOD_LIMIT", 200.0, float)
 VERTEX_LIMIT = get_arg("VERTEX_LIMIT", 32767, int)
+# 📁 Caminhos de entrada e saída definidos via CMD ou padrão
+#input_folder = OUTPUT_DIR
+output_folder = os.path.join(OUTPUT_DIR, "splits_output")
+
+os.makedirs(output_folder, exist_ok=True)
+print(f"📦 [ARGS] MAP_NAME={MAP_NAME}")
+print(f"📦 [ARGS] input_folder={OUTPUT_DIR}")
+print(f"📦 [ARGS] output_folder={output_folder}")
 
 # define caminho absoluto para texturas invisíveis, coloridas etc
 output_texture_path = os.path.join(OUTPUT_DIR, "transparent_material.png")
@@ -45,7 +55,7 @@ os.makedirs(texture_dir, exist_ok=True)
 print(f"📦 [ARGS] OUTPUT_PATH={OUTPUT_PATH}, LOD_LIMIT={LOD_LIMIT}, VERTEX_LIMIT={VERTEX_LIMIT}")
 
 SEED                   = get_arg("seed", 1, int)
-NUM_BLOCKS             = get_arg("blocks", 20, int)
+NUM_BLOCKS             = get_arg("blocks", 10, int)
 STEP_LEN               = get_arg("step", 2.0, float)       # passo ao longo do traçado (m)
 BASE_ROAD_WIDTH        = get_arg("road_w", 56.0, float)     # largura base (m)
 SHOULDER_WIDTH_BASE    = get_arg("shoulder_w", 0.6, float) # acostamento base (m)
@@ -335,61 +345,51 @@ import bmesh
 
 def add_box_oriented(collection, center, right, forward, up, size_r, size_f, size_u, name="Building"):
     """
-    Cria um paralelepípedo orientado:
-      - eixo X local = right (largura)
-      - eixo Y local = forward (profundidade)
-      - eixo Z local = up (altura)
-      sizes são dimensões absolutas em cada eixo.
+    Cria um paralelepípedo orientado com winding consistente em todos os eixos.
+    As normais sempre apontam para fora, mesmo em sistemas canhotos.
     """
     mesh = bpy.data.meshes.new(name)
     obj  = bpy.data.objects.new(name, mesh)
     collection.objects.link(obj)
 
     bm = bmesh.new()
-    # metade das dimensões
     hx, hy, hz = size_r * 0.5, size_f * 0.5, size_u * 0.5
 
-    # base vectors escalados
     ex = right.normalized() * hx
     ey = forward.normalized() * hy
     ez = up.normalized() * hz
 
-    # 8 vértices
-    # canto "inferior" e "superior" em Z (usando ez)
+    # Detecta se sistema é canhoto
+    det = right.cross(forward).dot(up)
+    left_handed = det < 0
+
     corners = []
     for sx in (-1, 1):
         for sy in (-1, 1):
             for sz in (-1, 1):
                 v = center + ex*sx + ey*sy + ez*sz
                 corners.append(bm.verts.new(v))
-
     bm.verts.ensure_lookup_table()
 
-    # índices auxiliares (ordem consistente):
-    # vamos mapear manualmente as 6 faces (cada com 4 vértices)
-    def face(a,b,c,d):
-        try: bm.faces.new([corners[a], corners[b], corners[c], corners[d]])
-        except: pass
-
-    # computar índices por posição (sx,sy,sz) -> idx
-    # ordem que criei acima: sx in (-1,1), sy in (-1,1), sz in (-1,1)
     def idx(sx, sy, sz):
         return (0 if sx==-1 else 4) + (0 if sy==-1 else 2) + (0 if sz==-1 else 1)
 
-    # faces
-    # +X (right)
-    face(idx( 1,-1,-1), idx( 1,-1, 1), idx( 1, 1, 1), idx( 1, 1,-1))
-    # -X (left)
-    face(idx(-1, 1,-1), idx(-1, 1, 1), idx(-1,-1, 1), idx(-1,-1,-1))
-    # +Y (forward)
-    face(idx(-1, 1,-1), idx( 1, 1,-1), idx( 1, 1, 1), idx(-1, 1, 1))
-    # -Y (back)
-    face(idx( 1,-1,-1), idx(-1,-1,-1), idx(-1,-1, 1), idx( 1,-1, 1))
-    # +Z (top)
-    face(idx(-1,-1, 1), idx( 1,-1, 1), idx( 1, 1, 1), idx(-1, 1, 1))
-    # -Z (bottom)
-    face(idx(-1, 1,-1), idx( 1, 1,-1), idx( 1,-1,-1), idx(-1,-1,-1))
+    def make_face(a,b,c,d, want_dir):
+        vs = [corners[a], corners[b], corners[c], corners[d]]
+        n = (vs[1].co - vs[0].co).cross(vs[2].co - vs[0].co)
+        if n.dot(want_dir) < 0:
+            vs = [vs[0], vs[3], vs[2], vs[1]]
+        bm.faces.new(vs)
 
+    # Faces com normais desejadas
+    make_face(idx( 1,-1,-1), idx( 1,-1, 1), idx( 1, 1, 1), idx( 1, 1,-1),  right)   # +X
+    make_face(idx(-1, 1,-1), idx(-1, 1, 1), idx(-1,-1, 1), idx(-1,-1,-1), -right)  # -X
+    make_face(idx(-1, 1,-1), idx( 1, 1,-1), idx( 1, 1, 1), idx(-1, 1, 1),  forward) # +Y
+    make_face(idx( 1,-1,-1), idx(-1,-1,-1), idx(-1,-1, 1), idx( 1,-1, 1), -forward) # -Y
+    make_face(idx(-1,-1, 1), idx( 1,-1, 1), idx( 1, 1, 1), idx(-1, 1, 1),  up)      # +Z
+    make_face(idx(-1, 1,-1), idx( 1, 1,-1), idx( 1,-1,-1), idx(-1,-1,-1), -up)      # -Z
+
+    bm.normal_update()
     bm.to_mesh(mesh)
     bm.free()
     return obj
@@ -477,6 +477,7 @@ def frames_from_program(program):
         right   = forward.cross(up_axis).normalized()
         upv     = right.cross(forward).normalized()
 
+
         # curvatura aproximada e raio
         curvature = abs(dyaw) / max(ds, 1e-6)            # rad/m ~ deg/m (escala aproximada)
         r = 1.0/max(curvature, 1e-6)
@@ -524,6 +525,23 @@ def frames_from_program(program):
 def face_safe(bm, vs):
     try: bm.faces.new(vs)
     except: pass
+
+# --- helper robusto de winding/normal ---
+def face_with_normal(bm, vs, want_dir=None):
+    """
+    Cria quad com winding consistente. Se want_dir for dado,
+    calcula normal (v0,v1,v2) e inverte a ordem se necessário.
+    """
+    try:
+        if want_dir is not None and len(vs) >= 3:
+            n = (vs[1].co - vs[0].co).cross(vs[2].co - vs[0].co)
+            # se a normal estiver oposta ao que queremos, invertimos o quad
+            if n.dot(want_dir) < 0:
+                vs = [vs[0], vs[3], vs[2], vs[1]]
+        bm.faces.new(vs)
+    except:
+        pass
+
 
 def build_block_area(center, forward, right, up, collection, name="BlockArea"):
     """
@@ -626,17 +644,23 @@ def build_block_barrier(center, forward, right, up, collection, is_start=True, n
 
     bm.verts.ensure_lookup_table()
 
-    def safe_face(vs):
-        try: bm.faces.new(vs)
-        except: pass
+    def make_face(vs, want_dir):
+        try:
+            n = (vs[1].co - vs[0].co).cross(vs[2].co - vs[0].co)
+            if n.dot(want_dir) < 0:
+                vs = [vs[0], vs[3], vs[2], vs[1]]
+            bm.faces.new(vs)
+        except:
+            pass
 
-    # faces
-    safe_face([vBL, vBR, vTR, vTL])
-    safe_face([vOBL, vOTL, vOTR, vOBR])
-    safe_face([vBL, vTL, vOTL, vOBL])
-    safe_face([vBR, vOBR, vOTR, vTR])
-    safe_face([vTL, vTR, vOTR, vOTL])
-    safe_face([vBL, vOBL, vOBR, vBR])
+    # faces com normais corretas
+    make_face([vBL, vBR, vTR, vTL],  up)       # frente (voltada para cima da estrada)
+    make_face([vOBL, vOTL, vOTR, vOBR], -forward)  # traseira
+    make_face([vBL, vTL, vOTL, vOBL], -right)  # lado esquerdo
+    make_face([vBR, vOBR, vOTR, vTR],  right)  # lado direito
+    make_face([vTL, vTR, vOTR, vOTL],  up)     # topo
+    make_face([vBL, vOBL, vOBR, vBR], -up)     # base
+
 
     bm.to_mesh(mesh)
     bm.free()
@@ -713,6 +737,7 @@ def build_invisible_barrier(center, forward, right, up, collection, name="Invisi
     # base (opcional; deixa fechado)
     face_safe([vBL, vOBL, vOBR, vBR])
 
+    bm.normal_update()
     bm.to_mesh(mesh)
     bm.free()
 
@@ -725,7 +750,6 @@ def build_invisible_barrier(center, forward, right, up, collection, name="Invisi
     obj.hide_render   = not BLOCK_BARRIER_VISIBLE
 
     return obj
-
 
 
 def build_road(frames, collection):
@@ -746,10 +770,13 @@ def build_road(frames, collection):
         BR.append(bm.verts.new(pos + right*wR - up*(ROAD_THICKNESS/2)))
 
     for i in range(len(frames)-1):
-        face_safe(bm, [TL[i], TR[i], TR[i+1], TL[i+1]]) # topo
-        face_safe(bm, [BL[i+1], BR[i+1], BR[i], BL[i]]) # base
-        face_safe(bm, [TL[i], TL[i+1], BL[i+1], BL[i]]) # lateral esq
-        face_safe(bm, [BR[i], BR[i+1], TR[i+1], TR[i]]) # lateral dir
+        # topo
+        face_safe(bm, [TL[i], TR[i], TR[i+1], TL[i+1]])
+        # base corrigida
+        face_safe(bm, [BL[i], BR[i], BR[i+1], BL[i+1]])
+        # laterais
+        face_safe(bm, [TL[i], TL[i+1], BL[i+1], BL[i]])
+        face_safe(bm, [BR[i], BR[i+1], TR[i+1], TR[i]])
 
     # caps
     if TL:
@@ -757,6 +784,7 @@ def build_road(frames, collection):
         n = len(TL)-1
         face_safe(bm, [TL[n], TR[n], BR[n], BL[n]])
 
+    bm.normal_update()
     bm.to_mesh(mesh)
     bm.free()
     try:
@@ -764,6 +792,7 @@ def build_road(frames, collection):
     except:
         pass
     return obj
+
 
 def build_barrier(frames, collection, side=1):
     mesh = bpy.data.meshes.new(f"Barrier_{'R' if side==1 else 'L'}")
@@ -773,31 +802,51 @@ def build_barrier(frames, collection, side=1):
 
     quads = []
     for f in frames:
-        pos, right, up = f["pos"], f["right"], f["up"]
+        # vetores normalizados do frame
+        pos   = f["pos"]
+        right = f["right"].normalized()
+        up    = f["up"].normalized()
+        fwd   = f["fwd"].normalized()
+
         edge_off = (f["road_w"]*0.5 + f["shoulder_w"] + BARRIER_OFFSET)
+
         base_c = pos + right*(edge_off*side) + up*(ROAD_THICKNESS/2)
         tdir   = right*(BARRIER_THICKNESS*side)
 
+        # seção (BL, BR, TR, TL)
         BL = bm.verts.new(base_c)
         BR = bm.verts.new(base_c + tdir)
         TL = bm.verts.new(base_c + up*BARRIER_HEIGHT)
         TR = bm.verts.new(base_c + tdir + up*BARRIER_HEIGHT)
-        quads.append((BL,BR,TR,TL))
+
+        # guardamos também os vetores desse frame p/ “want_dir”
+        quads.append((BL, BR, TR, TL, right, up, fwd))
 
     for i in range(len(quads)-1):
-        a0,a1,a2,a3 = quads[i]
-        b0,b1,b2,b3 = quads[i+1]
-        face_safe(bm, [a0,a1,b1,b0])  # base
-        face_safe(bm, [a3,a2,b2,b3])  # topo
-        face_safe(bm, [a1,a2,b2,b1])  # externa
-        face_safe(bm, [a0,b0,b3,a3])  # interna
+        a0,a1,a2,a3, ar, au, af = quads[i]
+        b0,b1,b2,b3, br, bu, bf = quads[i+1]
 
+        # base (queremos normal para baixo: -up)
+        face_with_normal(bm, [a0, a1, b1, b0], want_dir = -au)
+        # topo (queremos normal para cima: +up)
+        face_with_normal(bm, [a3, a2, b2, b3], want_dir =  au)
+
+        # face externa (lado de fora da rua) → +right * side
+        face_with_normal(bm, [a1, a2, b2, b1], want_dir =  ar * side)
+        # face interna (voltada para a pista)  → -right * side
+        face_with_normal(bm, [a0, b0, b3, a3], want_dir = -ar * side)
+
+    # tampas (início/fim), se existir pelo menos uma seção
     if quads:
-        a0,a1,a2,a3 = quads[0]
-        face_safe(bm, [a0,a1,a2,a3])
-        b0,b1,b2,b3 = quads[-1]
-        face_safe(bm, [b3,b2,b1,b0])
+        a0,a1,a2,a3, ar, au, af = quads[0]
+        # tampa inicial (voltada para trás): -forward
+        face_with_normal(bm, [a3, a2, a1, a0], want_dir = -af)
 
+        b0,b1,b2,b3, br, bu, bf = quads[-1]
+        # tampa final (voltada para frente): +forward
+        face_with_normal(bm, [b0, b1, b2, b3], want_dir =  bf)
+
+    bm.normal_update()
     bm.to_mesh(mesh)
     bm.free()
 
@@ -806,6 +855,8 @@ def build_barrier(frames, collection, side=1):
     except:
         pass
     return obj
+
+
 
 def build_buildpad(frames, collection, side=1):
     mesh = bpy.data.meshes.new(f"BuildPad_{'R' if side==1 else 'L'}")
@@ -816,7 +867,6 @@ def build_buildpad(frames, collection, side=1):
     quads = []
     for f in frames:
         pos, right, up = f["pos"], f["right"], f["up"]
-        # distância do centro da pista até o início do piso
         edge_off = (f["road_w"]*0.5 + f["shoulder_w"]
                     + BARRIER_OFFSET + BARRIER_THICKNESS + BUILD_PAD_OFFSET)
         base_c = pos + right*(edge_off*side) + up*(ROAD_THICKNESS/2)
@@ -831,23 +881,36 @@ def build_buildpad(frames, collection, side=1):
     for i in range(len(quads)-1):
         a0,a1,a2,a3 = quads[i]
         b0,b1,b2,b3 = quads[i+1]
-        # faces conectando os retângulos ao longo do caminho
-        for vs in (
-            [a0,a1,b1,b0],
-            [a3,a2,b2,b3],
-            [a1,a2,b2,b1],
-            [a0,b0,b3,a3],
-        ):
-            try: bm.faces.new(vs)
-            except: pass
 
-    # tampas das extremidades
+        if side == 1:
+            # lado direito (sentido normal)
+            face_safe(bm, [a0,a1,b1,b0])  # base
+            face_safe(bm, [a3,a2,b2,b3])  # topo
+            face_safe(bm, [a1,a2,b2,b1])  # externa
+            face_safe(bm, [a0,b0,b3,a3])  # interna
+        else:
+            # lado esquerdo (espelhar winding)
+            face_safe(bm, [a0,b0,b1,a1])  # base
+            face_safe(bm, [a3,b3,b2,a2])  # topo
+            face_safe(bm, [a1,b1,b2,a2])  # externa
+            face_safe(bm, [a0,a3,b3,b0])  # interna
+
+
     if quads:
         a0,a1,a2,a3 = quads[0]
-        bm.faces.new([a0,a1,a2,a3])
-        b0,b1,b2,b3 = quads[-1]
-        bm.faces.new([b3,b2,b1,b0])
+        if side == 1:
+            bm.faces.new([a3,a2,a1,a0])
+        else:
+            bm.faces.new([a0,a1,a2,a3])
 
+        b0,b1,b2,b3 = quads[-1]
+        if side == 1:
+            bm.faces.new([b0,b1,b2,b3])
+        else:
+            bm.faces.new([b3,b2,b1,b0])
+
+
+    bm.normal_update()
     bm.to_mesh(mesh)
     bm.free()
     try:
@@ -858,7 +921,8 @@ def build_buildpad(frames, collection, side=1):
 
 def build_tunnel(frames, collection):
     """
-    Gera um túnel quadrado/retangular conectando as barreiras.
+    Gera um túnel quadrado/retangular conectando as barreiras,
+    garantindo winding consistente (sem depender de recalc normals).
     """
     mesh = bpy.data.meshes.new("Tunnel")
     obj  = bpy.data.objects.new("Tunnel", mesh)
@@ -867,10 +931,11 @@ def build_tunnel(frames, collection):
 
     quads = []
     for f in frames:
-        pos, right, up = f["pos"], f["right"], f["up"]
+        pos, right, up = f["pos"], f["right"].normalized(), f["up"].normalized()
         # distância lateral até cada barreira
         edge_offset = (f["road_w"]*0.5 + f["shoulder_w"] + BARRIER_OFFSET)
-        # posições base (centro da parede esquerda e direita)
+
+        # posições base (centro das paredes esquerda e direita)
         left_base  = pos - right * (edge_offset + BARRIER_THICKNESS/2)
         right_base = pos + right * (edge_offset + BARRIER_THICKNESS/2)
 
@@ -878,52 +943,72 @@ def build_tunnel(frames, collection):
         floor_z = ROAD_THICKNESS/2
         top_z   = floor_z + TUNNEL_HEIGHT
 
-        # define vetores auxiliares
+        # espessuras
         t_thick = TUNNEL_THICKNESS
-        r_thick = TUNNEL_ROOF_THICK
+        r_thick = TUNNEL_ROOF_THICK  # (usado no teto externo)
 
-        # cria vértices principais das duas paredes
-        # lado esquerdo
-        L_BI = bm.verts.new(left_base + up*floor_z)
-        L_TO = bm.verts.new(left_base + up*top_z)
-        L_BE = bm.verts.new(left_base + up*floor_z - right*t_thick)
-        L_TE = bm.verts.new(left_base + up*top_z   - right*t_thick)
+        # vértices principais das duas paredes
+        # lado esquerdo (interno = sem deslocamento em -right; externo = -right * t_thick)
+        L_BI = bm.verts.new(left_base + up*floor_z)                 # bottom inner
+        L_TO = bm.verts.new(left_base + up*top_z)                    # top inner
+        L_BE = bm.verts.new(left_base + up*floor_z - right*t_thick)  # bottom external
+        L_TE = bm.verts.new(left_base + up*top_z   - right*t_thick)  # top external
 
-        # lado direito
+        # lado direito (interno = sem deslocamento; externo = +right * t_thick)
         R_BI = bm.verts.new(right_base + up*floor_z)
         R_TO = bm.verts.new(right_base + up*top_z)
         R_BE = bm.verts.new(right_base + up*floor_z + right*t_thick)
         R_TE = bm.verts.new(right_base + up*top_z   + right*t_thick)
 
-        quads.append((L_BI,L_TO,L_TE,L_BE, R_BI,R_TO,R_TE,R_BE))
+        quads.append((L_BI,L_TO,L_TE,L_BE,  R_BI,R_TO,R_TE,R_BE,  right, up))
 
-    # faces
+    # faces entre segmentos
     for i in range(len(quads)-1):
         a = quads[i]
         b = quads[i+1]
+        # desempacota + vetores alvo locais (do segmento 'a')
+        L_BI,L_TO,L_TE,L_BE,  R_BI,R_TO,R_TE,R_BE,  right, up = a
+        L_BI2,L_TO2,L_TE2,L_BE2,  R_BI2,R_TO2,R_TE2,R_BE2,  right2, up2 = b
 
-        # paredes esquerda e direita
-        face_safe(bm, [a[0],a[1],b[1],b[0]])  # parede interna esquerda
-        face_safe(bm, [a[4],a[5],b[5],b[4]])  # parede interna direita
-        face_safe(bm, [a[3],a[2],b[2],b[3]])  # parede externa esquerda
-        face_safe(bm, [a[7],a[6],b[6],b[7]])  # parede externa direita
+        # --- paredes internas (normais apontando para dentro do túnel) ---
+        # esquerda (queremos +right)
+        face_with_normal(bm, [L_BI, L_TO, L_TO2, L_BI2], want_dir= right)
+        # direita (queremos -right)
+        face_with_normal(bm, [R_BI, R_TO, R_TO2, R_BI2], want_dir=-right)
 
-        # se teto ativado
+        # --- paredes externas (normais apontando para fora) ---
+        # esquerda externa (queremos -right)
+        face_with_normal(bm, [L_BE, L_TE, L_TE2, L_BE2], want_dir=-right)
+        # direita externa (queremos +right)
+        face_with_normal(bm, [R_BE, R_TE, R_TE2, R_BE2], want_dir= right)
+
+        # --- teto (se ativado) ---
         if TUNNEL_HAS_ROOF:
-            # teto entre as partes internas superiores
-            face_safe(bm, [a[1],a[5],b[5],b[1]])  # teto interno
-            # teto externo (espessura)
-            face_safe(bm, [a[2],a[6],b[6],b[2]])
+            # interno (queremos normal para baixo = -up)
+            face_with_normal(bm, [L_TO, R_TO, R_TO2, L_TO2], want_dir=-up)
+            # externo (espessura do teto; queremos normal para cima = +up)
+            face_with_normal(bm, [L_TE, R_TE, R_TE2, L_TE2], want_dir= up)
 
+        # (opcional) pode fechar o piso se quiser um “caixote” completo:
+        # interno do piso (normal para cima = +up):
+        # face_with_normal(bm, [L_BI, R_BI, R_BI2, L_BI2], want_dir= up)
+        # externo do piso (normal para baixo = -up):
+        # face_with_normal(bm, [L_BE, R_BE, R_BE2, L_BE2], want_dir=-up)
+
+    bm.normal_update()
     bm.to_mesh(mesh)
     bm.free()
 
     if TUNNEL_VISIBLE:
-        obj.data.materials.append(MAT_TUNNEL)
+        try:
+            obj.data.materials.append(MAT_TUNNEL)
+        except:
+            pass
     obj.hide_viewport = not TUNNEL_VISIBLE
-    obj.hide_render = not TUNNEL_VISIBLE
+    obj.hide_render   = not TUNNEL_VISIBLE
 
     return obj
+
 
 
 # =========================
@@ -978,7 +1063,8 @@ def build_buildings_along_pads(frames, collection, side=1):
                     up = Vector((0, 0, 1))
                     # re-ortogonaliza right/forward em torno de up global
                     forward = Vector((forward.x, forward.y, 0)).normalized()
-                    right = forward.cross(up).normalized()
+                    right = Vector((0,0,1)).cross(forward).normalized()  # up_global × forward
+
 
 
                 # base do pad relativa ao centro da pista
@@ -1014,7 +1100,14 @@ def build_buildings_along_pads(frames, collection, side=1):
                     h_mod = 1.0 + (random.uniform(-ROW_HEIGHT_VARIATION, ROW_HEIGHT_VARIATION) * (row+1))
                     h = random.uniform(BUILD_H_MIN, BUILD_H_MAX) * h_mod
 
-                    obj = add_box_oriented(collection, center, right, forward, up, w, d, h, name=f"Building_r{row}")
+                    # mantém sistema de coordenadas destro para evitar faces invertidas
+                    right_fixed = right * side
+                    forward_fixed = forward
+                    if side == -1:
+                        forward_fixed = -forward
+
+                    obj = add_box_oriented(collection, center, right_fixed, forward_fixed, up, w, d, h, name=f"Building_r{row}")
+
                     try:
                         obj.data.materials.append(MAT_BUILDING)
                     except:
@@ -1175,7 +1268,7 @@ def build_obstacles(frames, collection):
 def build_spawn_points(start_frame, collection):
     """
     Gera uma formação de empties de spawn no início da pista.
-    Cada empty recebe custom properties com index e fila.
+    Agora usando rotação em Euler XYZ.
     """
     fwd, right, up = start_frame["fwd"], start_frame["right"], start_frame["up"]
     base_pos = start_frame["pos"] + fwd * SPAWN_OFFSET_FORWARD + up * SPAWN_OFFSET_UP
@@ -1193,8 +1286,11 @@ def build_spawn_points(start_frame, collection):
             empty.location = pos
             empty.empty_display_size = SPAWN_EMPTY_SIZE
             empty.empty_display_type = "ARROWS"
-            empty.rotation_mode = "QUATERNION"
-            empty.rotation_quaternion = fwd.to_track_quat("Z", "Y")
+            empty.rotation_mode = "XYZ"
+
+            quat = fwd.to_track_quat("Z", "Y")  # antes usado diretamente
+            empty.rotation_euler = quat.to_euler("XYZ")  # converte para Euler
+
             collection.objects.link(empty)
 
             # adiciona propriedades customizadas
@@ -1209,6 +1305,7 @@ def build_spawn_points(start_frame, collection):
 def build_checkpoints(frames, collection):
     """
     Gera empties de checkpoint com pontos de respawn próximos.
+    Agora usando Euler XYZ em vez de Quaternions.
     """
     total_frames = len(frames)
     step = max(1, int(CHECKPOINT_SPACING / (frames[-1]["s"] / total_frames)))
@@ -1226,8 +1323,11 @@ def build_checkpoints(frames, collection):
         chk.location = pos + up * CHECKPOINT_OFFSET_UP
         chk.empty_display_type = "CUBE"
         chk.empty_display_size = CHECKPOINT_EMPTY_SIZE * 1.5
-        chk.rotation_mode = "QUATERNION"
-        chk.rotation_quaternion = fwd.to_track_quat("Z", "Y")
+        chk.rotation_mode = "XYZ"
+
+        quat = fwd.to_track_quat("Z", "Y")
+        chk.rotation_euler = quat.to_euler("XYZ")
+
         collection.objects.link(chk)
         chk["checkpoint_id"] = checkpoint_id
 
@@ -1246,8 +1346,11 @@ def build_checkpoints(frames, collection):
                 e.location = p
                 e.empty_display_type = "ARROWS"
                 e.empty_display_size = CHECKPOINT_EMPTY_SIZE
-                e.rotation_mode = "QUATERNION"
-                e.rotation_quaternion = fwd.to_track_quat("Z", "Y")
+                e.rotation_mode = "XYZ"
+
+                quat_r = fwd.to_track_quat("Z", "Y")
+                e.rotation_euler = quat_r.to_euler("XYZ")
+
                 collection.objects.link(e)
 
                 # custom props
@@ -1261,6 +1364,9 @@ def build_checkpoints(frames, collection):
 
     print(f"[TrackGen] Gerados {checkpoint_id} checkpoints com respawns.")
 
+
+import math
+
 def export_game_data(json_path=None):
     """
     Exporta dados úteis ao GTA/FiveM:
@@ -1268,6 +1374,7 @@ def export_game_data(json_path=None):
       - spawn points iniciais
       - checkpoints e respawns
     Tudo em um único arquivo JSON para leitura simples no jogo.
+    As rotações são exportadas em GRAUS (Euler XYZ).
     """
     if not json_path:
         json_path = os.path.join(OUTPUT_DIR, "track_data.json")
@@ -1279,6 +1386,13 @@ def export_game_data(json_path=None):
         "respawns": []
     }
 
+    def rot_to_deg(euler):
+        return [
+            round(math.degrees(euler.x), 3),
+            round(math.degrees(euler.y), 3),
+            round(math.degrees(euler.z), 3)
+        ]
+
     # 1️⃣ Anchors (malhas splittadas)
     for obj in bpy.data.objects:
         if obj.type == "MESH" and "_split_" in obj.name:
@@ -1287,18 +1401,18 @@ def export_game_data(json_path=None):
             data["meshes"].append({
                 "name": obj.name,
                 "pos": [round(loc.x, 3), round(loc.y, 3), round(loc.z, 3)],
-                "rot": [round(rot.x, 3), round(rot.y, 3), round(rot.z, 3)]
+                "rot": rot_to_deg(rot)
             })
 
     # 2️⃣ Spawn Points
     for obj in bpy.data.objects:
         if obj.name.startswith("Spawn_"):
             loc = obj.location
-            rot = obj.rotation_quaternion.to_euler()
+            rot = obj.rotation_euler
             data["spawn_points"].append({
                 "name": obj.name,
                 "pos": [round(loc.x, 3), round(loc.y, 3), round(loc.z, 3)],
-                "rot": [round(rot.x, 3), round(rot.y, 3), round(rot.z, 3)],
+                "rot": rot_to_deg(rot),
                 "row": int(obj.get("spawn_row", 0)),
                 "col": int(obj.get("spawn_col", 0)),
                 "index": int(obj.get("spawn_index", 0))
@@ -1308,13 +1422,14 @@ def export_game_data(json_path=None):
     for obj in bpy.data.objects:
         if obj.name.startswith("Checkpoint_"):
             loc = obj.location
-            rot = obj.rotation_quaternion.to_euler()
+            rot = obj.rotation_euler
             cid = int(obj.get("checkpoint_id", 0))
+
             checkpoint_entry = {
                 "id": cid,
                 "name": obj.name,
                 "pos": [round(loc.x, 3), round(loc.y, 3), round(loc.z, 3)],
-                "rot": [round(rot.x, 3), round(rot.y, 3), round(rot.z, 3)],
+                "rot": rot_to_deg(rot),
                 "respawns": []
             }
 
@@ -1322,18 +1437,17 @@ def export_game_data(json_path=None):
             for e in bpy.data.objects:
                 if e.name.startswith(f"Respawn_{cid}_"):
                     eloc = e.location
-                    erot = e.rotation_quaternion.to_euler()
+                    erot = e.rotation_euler
                     checkpoint_entry["respawns"].append({
                         "name": e.name,
                         "pos": [round(eloc.x, 3), round(eloc.y, 3), round(eloc.z, 3)],
-                        "rot": [round(erot.x, 3), round(erot.y, 3), round(erot.z, 3)],
+                        "rot": rot_to_deg(erot),
                         "row": int(e.get("respawn_row", 0)),
                         "col": int(e.get("respawn_col", 0)),
                         "index": int(e.get("respawn_index", 0))
                     })
 
             data["checkpoints"].append(checkpoint_entry)
-            # respawns também em lista geral
             data["respawns"] += checkpoint_entry["respawns"]
 
     # salva arquivo
@@ -1346,6 +1460,20 @@ def export_game_data(json_path=None):
           f"{len(data['checkpoints'])} checkpoints, {len(data['respawns'])} respawns.")
 
     return data
+
+
+def recalc_normals_outside(obj):
+    if obj.type != 'MESH':
+        return
+    me = obj.data
+    # Garante cálculo atualizado
+    me.update()
+    # Modo Edit pra usar o operador de recálculo
+    bpy.context.view_layer.objects.active = obj
+    bpy.ops.object.mode_set(mode='EDIT')
+    bpy.ops.mesh.select_all(action='SELECT')
+    bpy.ops.mesh.normals_make_consistent(inside=False)
+    bpy.ops.object.mode_set(mode='OBJECT')
 
 # =========================
 # EXECUÇÃO
@@ -1522,6 +1650,7 @@ def split_mesh_by_vertex_and_lod(obj, map_name, vertex_limit=32767, lod_limit=20
 
         # Cria novo mesh e transfere o conteúdo
         new_mesh = bpy.data.meshes.new(f"{map_name}_split_{part}")
+        bm.normal_update()
         bm_group.to_mesh(new_mesh)
 
         # ✅ Copia os materiais do objeto original
@@ -1711,7 +1840,7 @@ def convert_invisible_materials_to_principled():
             links.new(tex_image.outputs['Color'], principled.inputs['Base Color'])
             links.new(principled.outputs['BSDF'], output.inputs['Surface'])
 
-def create_color_texture(filepath, color, size=4):
+def create_color_texture(filepath, color, size=400):
     """Cria uma textura PNG 1x1 (ou NxN) da cor RGBA especificada."""
     rgba = tuple(int(c*255) for c in color)
     img = Image.new("RGBA", (size, size), rgba)
@@ -1793,15 +1922,9 @@ def join_all_meshes_before_split(map_name="map"):
     print(f"✅ Mesh unificada: {joined_obj.name}")
     return joined_obj
 
-def export_splits_to_obj(base_dir=None, map_name="track"):
-    """
-    Exporta cada objeto que contenha '_split_' no nome como um .obj individual.
-    Salva todos os arquivos em <OUTPUT_DIR>/splits/<obj_name>.obj
-    """
-    if base_dir is None:
-        base_dir = OUTPUT_DIR
+def export_splits_to_obj(map_name="track"):
 
-    export_dir = os.path.join(base_dir, "splits")
+    export_dir = os.path.abspath("D:\ExportGTA\saida\objs")
     os.makedirs(export_dir, exist_ok=True)
 
     split_objs = [o for o in bpy.data.objects if o.type == "MESH" and "_split_" in o.name]
@@ -1824,7 +1947,7 @@ def export_splits_to_obj(base_dir=None, map_name="track"):
                 export_selected_objects=True,
                 forward_axis='NEGATIVE_Z',
                 up_axis='Y',
-                export_materials=True,
+                export_materials=False,
                 path_mode='COPY',
             )
             print(f"✅ Exportado: {filepath}")
@@ -1833,13 +1956,7 @@ def export_splits_to_obj(base_dir=None, map_name="track"):
 
     print(f"📦 Exportação finalizada ({len(split_objs)} arquivos) → {export_dir}")
 
-# 📁 Caminhos de entrada e saída definidos via CMD ou padrão
-input_folder = OUTPUT_DIR
-output_folder = os.path.join(input_folder, "splits_output")
 
-os.makedirs(output_folder, exist_ok=True)
-print(f"📦 [ARGS] input_folder={input_folder}")
-print(f"📦 [ARGS] output_folder={output_folder}")
 
 PROPORTION_THRESHOLD = 0.01
 
@@ -2196,6 +2313,18 @@ def batch_process_objs(objs=None):
     print("📦 Todos os objetos permanecem na cena e foram adicionados ao YTYP.")
 
 
+def recalc_normals_outside(obj):
+    if obj.type != 'MESH':
+        return
+    me = obj.data
+    # Garante cálculo atualizado
+    me.update()
+    # Modo Edit pra usar o operador de recálculo
+    bpy.context.view_layer.objects.active = obj
+    bpy.ops.object.mode_set(mode='EDIT')
+    bpy.ops.mesh.select_all(action='SELECT')
+    bpy.ops.mesh.normals_make_consistent(inside=False)
+    bpy.ops.object.mode_set(mode='OBJECT')
 
 
 # -----------------------------------------------------
@@ -2228,8 +2357,9 @@ def process_track_for_export(map_name="map"):
     print(f"🎉 Exportação concluída com sucesso!")
     for part in parts:
         part.location = Vector((0,0,0))
+        recalc_normals_outside(part)
 
-    #export_splits_to_obj(OUTPUT_DIR, MAP_NAME)
+    export_splits_to_obj(MAP_NAME)
     
     # 🚀 Executa
     batch_process_objs(objs=parts)
