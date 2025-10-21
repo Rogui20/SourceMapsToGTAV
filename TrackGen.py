@@ -27,7 +27,7 @@ def get_arg(k, default=None, cast=str):
 
 
 
-MAP_NAME = get_arg("MAP_NAME", "track1", str)
+MAP_NAME = get_arg("MAP_NAME", "tracks", str)
 # raiz padrão (pode vir do argumento OUTPUT_PATH)
 OUTPUT_ROOT = os.path.abspath("D:/TrackGen/output/" + MAP_NAME)
 OUTPUT_PATH = os.path.join(OUTPUT_ROOT, "track_data.json")
@@ -55,7 +55,7 @@ os.makedirs(texture_dir, exist_ok=True)
 print(f"📦 [ARGS] OUTPUT_PATH={OUTPUT_PATH}, LOD_LIMIT={LOD_LIMIT}, VERTEX_LIMIT={VERTEX_LIMIT}")
 
 SEED                   = get_arg("seed", 1, int)
-NUM_BLOCKS             = get_arg("blocks", 10, int)
+NUM_BLOCKS             = get_arg("blocks", 50, int)
 STEP_LEN               = get_arg("step", 2.0, float)       # passo ao longo do traçado (m)
 BASE_ROAD_WIDTH        = get_arg("road_w", 56.0, float)     # largura base (m)
 SHOULDER_WIDTH_BASE    = get_arg("shoulder_w", 0.6, float) # acostamento base (m)
@@ -93,9 +93,9 @@ TUNNEL_VISIBLE     = get_arg("tunnel_visible", 0, int) == 1  # se 1, gera materi
 # Dinâmica
 TARGET_SPEED           = get_arg("v_ms", 45.0, float)  # velocidade alvo (m/s) ~ 162 km/h
 BANK_MAX_DEG           = get_arg("bank_max", 10.0, float)
-BANK_SMOOTH            = get_arg("bank_smooth", 0.15, float)  # 0..1 filtro exp
-WIDTH_CURV_FACT        = get_arg("w_curv", 0.25, float)       # intensidade da variação de largura (0..~0.5)
-PITCH_SMOOTH           = get_arg("pitch_smooth", 0.20, float) # suavização de pitch (0..1)
+BANK_SMOOTH            = get_arg("bank_smooth", 0.25, float)  # 0..1 filtro exp
+WIDTH_CURV_FACT        = get_arg("w_curv", 0.10, float)       # intensidade da variação de largura (0..~0.5)
+PITCH_SMOOTH           = get_arg("pitch_smooth", 0.06, float) # suavização de pitch (0..1)
 
 # Pós
 MERGE_DIST             = get_arg("merge", 0.0001, float)
@@ -287,7 +287,6 @@ CHECKPOINT_RESPAWN_OFFSET_FWD = get_arg("respawn_off_fwd", 8.0, float)
 CHECKPOINT_EMPTY_SIZE     = get_arg("checkpoint_empty_size", 1.2, float)
 
 
-
 random.seed(SEED)
 
 def create_simple_mat(name, rgba):
@@ -405,16 +404,23 @@ def block_straight(L=40.0):
         t = (i+1)/steps
         yield 0.0, 0.0, STEP_LEN  # yawΔ, pitchΔ, ds
 
-def block_curve(angle_deg=30.0, radius=60.0, left=True):
-    # comprimento do arco
-    arc = math.radians(abs(angle_deg)) * max(radius, 1e-3)
-    steps = max(1, int(arc/STEP_LEN))
-    # easing "clothoid light": yawΔ cresce e decresce suavemente
+def block_curve(angle_deg=30.0, radius=60.0, left=True, ease_type="sin"):
+    """
+    Gera passos de curva com easing suave.
+    ease_type: "sin" (padrão) ou "cos" etc. Mantém yaw_step crescendo e decrescendo.
+    """
+    arc = math.radians(abs(angle_deg)) * max(radius, 1e-6)
+    steps = max(1, int(arc / STEP_LEN))
+    yaw_total = angle_deg
     for i in range(steps):
-        u = (i+0.5)/steps  # 0..1
-        ease = math.sin(u*math.pi)    # sino: 0->1->0
-        yaw_total = angle_deg
-        yaw_step = (yaw_total/steps) * ease
+        u = (i + 0.5) / steps  # 0..1
+        if ease_type == "sin":
+            ease = math.sin(u * math.pi)    # sin: 0->1->0 (suave)
+        else:
+            # fallback: cos ease-in-out
+            ease = 0.5 - 0.5 * math.cos(u * math.pi)
+        # yaw_step em graus (soma aproximada será < yaw_total; mas forma é mais suave)
+        yaw_step = (yaw_total / steps) * ease
         if not left:
             yaw_step = -yaw_step
         yield yaw_step, 0.0, STEP_LEN
@@ -454,53 +460,72 @@ def frames_from_program(program):
     """
     Integra posição e orientação (yaw/pitch), calcula forward/right/up.
     Banking alvo ~ atan(v^2/(r*g)) com clamp e filtro exponencial.
-    Largura varia com curvatura |Δyaw|/ds.
+    Largura varia com curvatura (agora usando radianos corretamente).
+    Adiciona suavização vertical (Z_SMOOTH) e clamp de dpitch por passo.
     """
     g = 9.81
-    pos = Vector((0,0,0))
+    pos = Vector((0, 0, 0))
     yaw = 0.0
     pitch = 0.0
     bank_curr = 0.0
     s_accum = 0.0
 
-    up_axis = Vector((0,0,1))
+    up_axis = Vector((0, 0, 1))
     frames = []
 
-    for (dyaw, dpitch, ds) in program:
-        # suaviza pitch (filtro exp)
-        pitch = (1.0 - PITCH_SMOOTH)*pitch + PITCH_SMOOTH*(pitch + dpitch)
+    # parâmetros de segurança/suavização (ajuste conforme preferir)
+    Z_SMOOTH = 0.6                     # 0..1 suaviza pos.z (maior = mais suave)
+    MAX_DPITCH_DEG_PER_STEP = 1.8     # limita variação de pitch por passo (graus)
+    # (sugestões de alteração de defaults)
+    # PITCH_SMOOTH = 0.08  # considere reduzir no call de get_arg se quiser ainda mais suave
 
-        # direção sem roll
+    for (dyaw, dpitch, ds) in program:
+        # clamp dpitch por step (evita picos)
+        if dpitch > MAX_DPITCH_DEG_PER_STEP:
+            dpitch = MAX_DPITCH_DEG_PER_STEP
+        elif dpitch < -MAX_DPITCH_DEG_PER_STEP:
+            dpitch = -MAX_DPITCH_DEG_PER_STEP
+
+        # target pitch depois do incremento local
+        target_pitch = pitch + dpitch
+        # suaviza pitch por LERP explícito
+        pitch = (1.0 - PITCH_SMOOTH) * pitch + PITCH_SMOOTH * target_pitch
+
+        # direção sem roll (usa yaw atual; atualizamos yaw no final)
         cy, sy = math.cos(math.radians(yaw)), math.sin(math.radians(yaw))
         cp, sp = math.cos(math.radians(pitch)), math.sin(math.radians(pitch))
-        forward = Vector((cy*cp, sy*cp, sp)).normalized()
-        right   = forward.cross(up_axis).normalized()
-        upv     = right.cross(forward).normalized()
+        forward = Vector((cy * cp, sy * cp, sp)).normalized()
+        right = forward.cross(up_axis).normalized()
+        upv = right.cross(forward).normalized()
 
+        # curvatura corrigida (usar radianos por metro)
+        curvature = abs(math.radians(dyaw)) / max(ds, 1e-6)   # rad/m
+        r = 1.0 / max(curvature, 1e-6)
 
-        # curvatura aproximada e raio
-        curvature = abs(dyaw) / max(ds, 1e-6)            # rad/m ~ deg/m (escala aproximada)
-        r = 1.0/max(curvature, 1e-6)
-        # banking alvo
-        bank_target = math.degrees(math.atan(min(1.0, (TARGET_SPEED**2)/(max(r,1.0)*g))))
-        bank_target = max(-BANK_MAX_DEG, min(BANK_MAX_DEG, bank_target)) * (1 if dyaw>=0 else -1)
+        # banking alvo (mais realista por usar radianos)
+        bank_target = math.degrees(math.atan(min(1.0, (TARGET_SPEED ** 2) / (max(r, 1.0) * g))))
+        bank_target = max(-BANK_MAX_DEG, min(BANK_MAX_DEG, bank_target)) * (1 if dyaw >= 0 else -1)
 
         # suaviza banking
-        bank_curr = (1.0 - BANK_SMOOTH)*bank_curr + BANK_SMOOTH*bank_target
+        bank_curr = (1.0 - BANK_SMOOTH) * bank_curr + BANK_SMOOTH * bank_target
 
         # aplica roll ao par (right, up)
         m_roll = Matrix.Rotation(math.radians(bank_curr), 4, forward)
         right = (m_roll @ right).normalized()
-        upv   = (m_roll @ upv).normalized()
+        upv = (m_roll @ upv).normalized()
 
-        # ajusta largura por curvatura
-        width_factor = 1.0 - WIDTH_CURV_FACT*min(1.0, curvature*STEP_LEN*4.0)  # estreita nas curvas
+        # ajusta largura por curvatura (menos sensível porque curvature está em rad/m)
+        width_factor = 1.0 - WIDTH_CURV_FACT * min(1.0, curvature * STEP_LEN * 4.0)
         road_w = BASE_ROAD_WIDTH * max(0.7, width_factor)
-        shoulder_w = SHOULDER_WIDTH_BASE * (0.8 + 0.4*width_factor)  # acostamento um pouco dinâmico
+        shoulder_w = SHOULDER_WIDTH_BASE * (0.8 + 0.4 * width_factor)
 
-        # avança posição
-        pos = pos + forward * ds
+        # integrar posição (raw)
+        raw_pos = pos + forward * ds
         s_accum += ds
+
+        # suavizar somente a componente Z para reduzir lombadas
+        new_z = (1.0 - Z_SMOOTH) * pos.z + Z_SMOOTH * raw_pos.z
+        pos = Vector((raw_pos.x, raw_pos.y, new_z))
 
         frames.append({
             "s": s_accum,
@@ -513,7 +538,7 @@ def frames_from_program(program):
             "shoulder_w": shoulder_w
         })
 
-        # atualiza yaw para próximo passo (depois de usar o valor corrente)
+        # atualiza yaw para próximo passo
         yaw += dyaw
 
     return frames
@@ -759,30 +784,51 @@ def build_road(frames, collection):
     bm = bmesh.new()
 
     TL, TR, BL, BR = [], [], [], []
+    Rs, Us, Fs = [], [], []  # guarda vetores por frame
+
+    half_t = ROAD_THICKNESS * 0.5
+
     for f in frames:
-        pos, left, right, up = f["pos"], -f["right"], f["right"], f["up"]
+        pos   = f["pos"]
+        right = f["right"].normalized()
+        up    = f["up"].normalized()
+        fwd   = f["fwd"].normalized()
+
+        # bordas esquerda/direita
+        left  = -right
         wL = (f["road_w"]*0.5 + f["shoulder_w"])
         wR = (f["road_w"]*0.5 + f["shoulder_w"])
 
-        TL.append(bm.verts.new(pos + left*wL + up*(ROAD_THICKNESS/2)))
-        TR.append(bm.verts.new(pos + right*wR + up*(ROAD_THICKNESS/2)))
-        BL.append(bm.verts.new(pos + left*wL - up*(ROAD_THICKNESS/2)))
-        BR.append(bm.verts.new(pos + right*wR - up*(ROAD_THICKNESS/2)))
+        TL.append(bm.verts.new(pos + left*wL  + up*half_t))
+        TR.append(bm.verts.new(pos + right*wR + up*half_t))
+        BL.append(bm.verts.new(pos + left*wL  - up*half_t))
+        BR.append(bm.verts.new(pos + right*wR - up*half_t))
 
+        Rs.append(right); Us.append(up); Fs.append(fwd)
+
+    # faces entre segmentos (usa want_dir por face)
     for i in range(len(frames)-1):
-        # topo
-        face_safe(bm, [TL[i], TR[i], TR[i+1], TL[i+1]])
-        # base corrigida
-        face_safe(bm, [BL[i], BR[i], BR[i+1], BL[i+1]])
-        # laterais
-        face_safe(bm, [TL[i], TL[i+1], BL[i+1], BL[i]])
-        face_safe(bm, [BR[i], BR[i+1], TR[i+1], TR[i]])
+        up_i    = Us[i]
+        right_i = Rs[i]
+        fwd_i   = Fs[i]
 
-    # caps
+        # topo: +up
+        face_with_normal(bm, [TL[i], TR[i], TR[i+1], TL[i+1]], want_dir= up_i)
+        # base: -up
+        face_with_normal(bm, [BL[i], BR[i], BR[i+1], BL[i+1]], want_dir=-up_i)
+
+        # lateral esquerda (externa): -right
+        face_with_normal(bm, [TL[i], TL[i+1], BL[i+1], BL[i]],  want_dir=-right_i)
+        # lateral direita (externa): +right
+        face_with_normal(bm, [BR[i], BR[i+1], TR[i+1], TR[i]],  want_dir= right_i)
+
+    # caps (se existirem)
     if TL:
-        face_safe(bm, [BL[0], BR[0], TR[0], TL[0]])
+        # cap inicial: -fwd
+        face_with_normal(bm, [BL[0], BR[0], TR[0], TL[0]], want_dir= -Fs[0])
+        # cap final: +fwd
         n = len(TL)-1
-        face_safe(bm, [TL[n], TR[n], BR[n], BL[n]])
+        face_with_normal(bm, [TL[n], TR[n], BR[n], BL[n]], want_dir=  Fs[n])
 
     bm.normal_update()
     bm.to_mesh(mesh)
@@ -792,6 +838,7 @@ def build_road(frames, collection):
     except:
         pass
     return obj
+
 
 
 def build_barrier(frames, collection, side=1):
@@ -2357,7 +2404,7 @@ def process_track_for_export(map_name="map"):
     print(f"🎉 Exportação concluída com sucesso!")
     for part in parts:
         part.location = Vector((0,0,0))
-        recalc_normals_outside(part)
+        #recalc_normals_outside(part)
 
     export_splits_to_obj(MAP_NAME)
     
